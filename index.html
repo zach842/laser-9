@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Laser Timer PWA</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#2d3b2d">
+  <link rel="stylesheet" href="style.css">
+  <script>
+    if ('serviceWorker' in navigator) {
+      addEventListener('load', () => navigator.serviceWorker.register('service-worker.js').catch(console.error));
+    }
+  </script>
+</head>
+<body>
+  <div id="splash">
+    <div class="splash-inner">
+      <div class="logo">Laser Timer PWA</div>
+      <div class="spinner"></div>
+      <div class="tip">Tap START to allow camera & sound</div>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">Bullseye Trainer</div>
+    <div class="controls">
+      <label>Game:
+        <select id="gameSelect">
+          <option value="5">5 shots</option>
+          <option value="10" selected>10 shots</option>
+          <option value="25">25 shots</option>
+        </select>
+      </label>
+      <button id="startBtn" class="btn">START</button>
+      <button id="calibBtn" class="icon-btn">Re‑Calibrate</button>
+      <span id="status" class="badge">Idle…</span>
+      <button id="settingsBtn" class="icon-btn">Settings</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="video-wrap">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <canvas id="proc" width="640" height="360" style="display:none"></canvas>
+      <div id="countdown" class="countdown hidden">10</div>
+    </div>
+
+    <section class="panel">
+      <div class="stat"><span id="shotsFired">0</span><small>Shots</small></div>
+      <div class="stat"><span id="lastScore">—</span><small>Last</small></div>
+      <div class="stat"><span id="totalScore">0</span><small>Total</small></div>
+      <div class="stat"><span id="avgScore">0</span><small>Avg</small></div>
+    </section>
+  </main>
+
+  <aside id="drawer">
+    <div class="drawer-header">
+      <h3>Settings</h3>
+      <button id="closeDrawer" class="icon-btn">Close</button>
+    </div>
+    <div class="drawer-body">
+      <label>Detection Sensitivity
+        <input type="range" id="sens" min="5" max="60" value="18">
+      </label>
+      <label>Min Blob Area (px²)
+        <input type="range" id="minArea" min="6" max="120" value="16">
+      </label>
+      <label>High FPS Mode (640×480 @ 60fps)
+        <input type="checkbox" id="hfps" checked>
+      </label>
+      <label>Calibrate High‑Res (720p)
+        <input type="checkbox" id="calibHi" checked>
+      </label>
+      <label>Square Fallback (if ArUco fails)
+        <input type="checkbox" id="sqFallback" checked>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="soundToggle" checked>
+        <span>Sound On</span>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="themeToggle">
+        <span>Dark Tactical Theme</span>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="debugToggle">
+        <span>Debug overlays (mask inset)</span>
+      </label>
+      <button id="resetScores" class="btn danger">Reset Scores</button>
+      <p class="small">v2h · ArUco + Square fallback</p>
+    </div>
+  </aside>
+
+  <audio id="beepAudio" src="assets/audio/countdown_beep.wav" preload="auto"></audio>
+  <audio id="steelAudio" src="assets/audio/steel_hit.wav" preload="auto"></audio>
+
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvFail()"></script>
+  <script src="main.js"></script>
+</body>
+</html>
