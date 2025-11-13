@@ -1,7 +1,8 @@
-/* Laser Timer — Bullseye (manual 4-corner calibration)
-   - No ArUco, no square detection.
-   - You tap the four corners of the target once (TL, TR, BR, BL).
-   - Homography H is built from those taps and used for all shots.
+/* Laser Timer — Bullseye (manual 4-corner calibration + guided flow)
+   Flow:
+   1) On launch: status = "Step 1: Show target. Step 2: Tap Calibrate."
+   2) Tap Calibrate → camera turns on → tap 4 corners (TL, TR, BR, BL).
+   3) Tap START → 10s countdown → gameplay.
 */
 
 let cvReady = false;
@@ -9,7 +10,7 @@ let video, overlay, proc, ctx, pctx, countdownEl;
 let running = false;
 
 let H = null;                      // perspective transform
-const warpSize = { w: 900, h: 1200 }; // virtual target space
+const warpSize = { w: 900, h: 1200 }; // virtual target scoring space
 
 let shotsFired = 0;
 let totalScore = 0;
@@ -38,6 +39,8 @@ function onOpenCvReady() {
     setTimeout(() => {
       const splash = document.getElementById('splash');
       if (splash) splash.style.display = 'none';
+      const status = document.getElementById('status');
+      if (status) status.textContent = 'Step 1: Show target. Step 2: Tap Calibrate.';
     }, 200);
   };
 }
@@ -79,26 +82,32 @@ function init() {
   // Tap handler for calibration on overlay
   overlay.addEventListener('click', handleCalibTap);
   overlay.addEventListener('touchstart', evt => {
-    // Use first touch only
     if (evt.touches && evt.touches.length > 0) {
       handleCalibTap(evt.touches[0]);
       evt.preventDefault();
     }
   });
+
+  const status = document.getElementById('status');
+  if (status) status.textContent = 'Step 1: Show target. Step 2: Tap Calibrate.';
 }
 
 window.addEventListener('DOMContentLoaded', init);
 
-// ===== Camera + main flow =====
+// ===== Camera helper (shared by Calibrate & Start) =====
 
-async function startFlow() {
+async function ensureCamera() {
+  // If we already have a live stream, keep it
+  if (video.srcObject) {
+    const live = video.srcObject.getTracks().some(t => t.readyState === 'live');
+    if (live) return;
+  }
+
   if (!cvReady) {
     alert('Vision engine still loading. Wait a moment and try again.');
-    return;
+    throw new Error('OpenCV not ready');
   }
-  if (running) return;
 
-  // iOS / browser audio unlock
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     await audioCtx.resume();
@@ -109,49 +118,53 @@ async function startFlow() {
   const hfps = $('#hfps')?.checked;
   const calibHi = $('#calibHi')?.checked;
 
-  try {
-    // Camera constraints: optionally high-res, optionally 60fps
-    const calibConstraints = calibHi
-      ? { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 60 } }, audio: false }
-      : { video: { facingMode: 'environment', width: { ideal: hfps ? 640 : 1280 }, height: { ideal: hfps ? 480 : 720 }, frameRate: { ideal: hfps ? 60 : 30, max: 60 } }, audio: false };
+  // Simple constraint: 640x480 or 1280x720 depending on toggle, 60fps if requested.
+  const widthIdeal  = calibHi ? 1280 : 640;
+  const heightIdeal = calibHi ? 720  : 480;
 
-    const stream = await navigator.mediaDevices.getUserMedia(calibConstraints);
+  const constraints = {
+    video: {
+      facingMode: 'environment',
+      width: { ideal: widthIdeal },
+      height: { ideal: heightIdeal },
+      frameRate: { ideal: hfps ? 60 : 30, max: 60 }
+    },
+    audio: false
+  };
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
     await video.play();
-
-    overlay.width = video.videoWidth;
-    overlay.height = video.videoHeight;
+    overlay.width = video.videoWidth || widthIdeal;
+    overlay.height = video.videoHeight || heightIdeal;
   } catch (e) {
     console.error(e);
     alert('Camera permission or constraints failed. Check browser permissions and HTTPS.');
+    throw e;
+  }
+}
+
+// ===== Main flow =====
+
+async function startFlow() {
+  // Gameplay should only start AFTER calibration
+  if (!H) {
+    const status = $('#status');
+    if (status) status.textContent = 'Please Calibrate first (Tap Calibrate, then 4 corners).';
+    alert('Please calibrate first: show the target, tap Calibrate, then tap the 4 corners.');
     return;
   }
 
-  // If high-fps mode requested, switch to 640x480@60fps after initial start
-  if (hfps || calibHi) {
-    try {
-      const playConstraints = {
-        video: {
-          facingMode: 'environment',
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          frameRate: { ideal: 60, max: 60 }
-        },
-        audio: false
-      };
-      const stream2 = await navigator.mediaDevices.getUserMedia(playConstraints);
-      if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
-      video.srcObject = stream2;
-      await video.play();
-
-      overlay.width = video.videoWidth;
-      overlay.height = video.videoHeight;
-    } catch (e) {
-      console.warn('Could not switch to 60fps low-res; continuing with initial stream.', e);
-    }
+  try {
+    await ensureCamera();
+  } catch {
+    return;
   }
 
-  // Show countdown before detecting hits
+  if (running) return;
+
+  // Countdown at the beginning of gameplay
   await countdown(10);
 
   shotsFired = 0;
@@ -163,20 +176,31 @@ async function startFlow() {
 
 // ===== Manual calibration (4-corner tap) =====
 
-function startManualCalibration() {
+async function startManualCalibration() {
+  if (!cvReady) {
+    alert('Vision engine still loading. Wait a moment and try again.');
+    return;
+  }
+
+  try {
+    await ensureCamera();
+  } catch {
+    return;
+  }
+
   calibrationMode = true;
   calibPoints = [];
   if (H) {
     H.delete();
     H = null;
   }
-  $('#status').textContent = 'Tap 4 corners (TL, TR, BR, BL)';
+  const status = $('#status');
+  if (status) status.textContent = 'Tap 4 corners (TL, TR, BR, BL).';
 }
 
 function handleCalibTap(evt) {
   if (!calibrationMode) return;
 
-  // evt may be MouseEvent or a Touch object
   const rect = overlay.getBoundingClientRect();
   const clientX = evt.clientX;
   const clientY = evt.clientY;
@@ -185,7 +209,7 @@ function handleCalibTap(evt) {
 
   calibPoints.push({ x, y });
 
-  // Draw small marker where tapped
+  // Draw marker where tapped
   ctx.save();
   ctx.beginPath();
   ctx.strokeStyle = '#00ff73';
@@ -196,7 +220,8 @@ function handleCalibTap(evt) {
   ctx.stroke();
   ctx.restore();
 
-  $('#status').textContent = `Calibration tap ${calibPoints.length}/4`;
+  const status = $('#status');
+  if (status) status.textContent = `Calibration tap ${calibPoints.length}/4`;
 
   if (calibPoints.length === 4) {
     buildHomographyFromCalib();
@@ -205,7 +230,7 @@ function handleCalibTap(evt) {
 
 function buildHomographyFromCalib() {
   try {
-    // Order the taps: we assume user tapped TL, TR, BR, BL
+    // Assume user tapped TL, TR, BR, BL in that order
     const p0 = calibPoints[0]; // TL
     const p1 = calibPoints[1]; // TR
     const p2 = calibPoints[2]; // BR
@@ -233,12 +258,14 @@ function buildHomographyFromCalib() {
 
     calibrationMode = false;
     calibPoints = [];
-    $('#status').textContent = 'Calibrated (manual corners)';
+    const status = $('#status');
+    if (status) status.textContent = 'Calibrated (manual corners). Tap START to begin.';
   } catch (e) {
     console.error('Homography build failed:', e);
     calibrationMode = false;
     calibPoints = [];
-    $('#status').textContent = 'Calibration failed. Try again.';
+    const status = $('#status');
+    if (status) status.textContent = 'Calibration failed. Tap Calibrate and try again.';
   }
 }
 
@@ -249,7 +276,7 @@ function frameLoop() {
 
   const rAF = video.requestVideoFrameCallback || window.requestAnimationFrame;
   rAF.call(video, () => {
-    // Draw video
+    // Draw live video
     ctx.drawImage(video, 0, 0, overlay.width, overlay.height);
     // Copy into processing canvas
     pctx.drawImage(video, 0, 0, proc.width, proc.height);
@@ -288,11 +315,9 @@ function frameLoop() {
           }, 80);
         }
       }
-    } else if (!H) {
-      // Gentle reminder
-      $('#status').textContent = calibrationMode
-        ? 'Tap 4 corners (TL, TR, BR, BL)'
-        : 'Not calibrated. Tap Re-Calibrate.';
+    } else if (!H && !calibrationMode) {
+      const status = $('#status');
+      if (status) status.textContent = 'Not calibrated. Tap Calibrate (then 4 corners).';
     }
 
     frameLoop();
