@@ -1,471 +1,279 @@
-/* Laser Timer — Bullseye (manual 4-corner calibration + guided flow)
-   Flow:
-   1) On launch: status = "Step 1: Show target. Step 2: Tap Calibrate."
-   2) Tap Calibrate → camera turns on → tap 4 corners (TL, TR, BR, BL).
-   3) Tap START → 10s countdown → gameplay.
+/* Laser Trainer PWA — Pi-connected version
+   - No camera / OpenCV in the browser
+   - UI only: countdown, game modes, sounds, stats
+   - Talks to Pi over HTTP:
+       POST /start_game    {shots}
+       POST /stop_game
+       GET  /stats
 */
-
-let cvReady = false;
-let video, overlay, proc, ctx, pctx, countdownEl;
-let running = false;
-
-let H = null;                      // perspective transform
-const warpSize = { w: 900, h: 1200 }; // virtual target scoring space
-
-let shotsFired = 0;
-let totalScore = 0;
-let gameShots = 10;
-let lastHitTs = 0;
-
-let soundOn = true;
-let audioCtx = null;
-let prevMask = null;
-
-// Manual calibration state
-let calibrationMode = false;
-let calibPoints = []; // [{x,y}, ...]
-
-const BULLSEYE = {
-  center: [450, 600],
-  rings: [120, 220, 320, 420],
-  points: [10, 9, 8, 7, 6]
-};
-
-// ===== OpenCV bootstrapping =====
-
-function onOpenCvReady() {
-  cv['onRuntimeInitialized'] = () => {
-    cvReady = true;
-    setTimeout(() => {
-      const splash = document.getElementById('splash');
-      if (splash) splash.style.display = 'none';
-      const status = document.getElementById('status');
-      if (status) status.textContent = 'Step 1: Show target. Step 2: Tap Calibrate.';
-    }, 200);
-  };
-}
-
-function onOpenCvFail() {
-  const tip = document.querySelector('#splash .tip');
-  if (tip) tip.textContent = 'OpenCV failed to load. Try reloading.';
-}
 
 const $ = sel => document.querySelector(sel);
 
-// ===== UI init =====
+// >>> SET THIS TO YOUR PI'S ADDRESS <<<
+let PI_BASE = "http://raspberrypi.local:5000"; 
+// If raspberrypi.local doesn't resolve, change to e.g. "http://192.168.1.42:5000"
+
+let soundOn = true;
+let audioCtx = null;
+
+let polling = false;
+let pollTimer = null;
+let localRunning = false;
+
+let gameShots = 10;
+
+// DOM refs (guarded so we don't crash if something's missing)
+let countdownEl, statusEl;
+let lastScoreEl, shotsFiredEl, totalScoreEl, avgScoreEl;
 
 function init() {
-  video = $('#video');
-  overlay = $('#overlay');
-  proc = $('#proc');
-  ctx = overlay.getContext('2d');
-  pctx = proc.getContext('2d');
-  countdownEl = $('#countdown');
+  countdownEl = $("#countdown");
+  statusEl = $("#status");
+  lastScoreEl = $("#lastScore");
+  shotsFiredEl = $("#shotsFired");
+  totalScoreEl = $("#totalScore");
+  avgScoreEl = $("#avgScore");
 
-  $('#settingsBtn').onclick = () => $('#drawer').classList.add('open');
-  $('#closeDrawer').onclick = () => $('#drawer').classList.remove('open');
+  const startBtn = $("#startBtn");
+  const stopBtn = $("#stopBtn"); // optional, may not exist
+  const gameSelect = $("#gameSelect");
+  const settingsBtn = $("#settingsBtn");
+  const closeDrawer = $("#closeDrawer");
+  const soundToggle = $("#soundToggle");
+  const themeToggle = $("#themeToggle");
+  const resetScores = $("#resetScores");
 
-  $('#soundToggle').onchange = e => { soundOn = e.target.checked; };
-  $('#themeToggle').onchange = e => { document.body.classList.toggle('dark', e.target.checked); };
-  $('#resetScores').onclick = () => {
-    shotsFired = 0;
-    totalScore = 0;
-    updateStats();
-    alert('Scores reset for this session.');
-  };
-
-  $('#gameSelect').onchange = e => { gameShots = parseInt(e.target.value, 10) || 10; };
-
-  $('#startBtn').onclick = startFlow;
-  $('#calibBtn').onclick = startManualCalibration;
-
-  // Tap handler for calibration on overlay
-  overlay.addEventListener('click', handleCalibTap);
-  overlay.addEventListener('touchstart', evt => {
-    if (evt.touches && evt.touches.length > 0) {
-      handleCalibTap(evt.touches[0]);
-      evt.preventDefault();
-    }
-  });
-
-  const status = document.getElementById('status');
-  if (status) status.textContent = 'Step 1: Show target. Step 2: Tap Calibrate.';
-}
-
-window.addEventListener('DOMContentLoaded', init);
-
-// ===== Camera helper (shared by Calibrate & Start) =====
-
-async function ensureCamera() {
-  // If we already have a live stream, keep it
-  if (video.srcObject) {
-    const live = video.srcObject.getTracks().some(t => t.readyState === 'live');
-    if (live) return;
+  if (statusEl) {
+    statusEl.textContent = "Connect to Pi, then select a game and tap START.";
   }
 
-  if (!cvReady) {
-    alert('Vision engine still loading. Wait a moment and try again.');
-    throw new Error('OpenCV not ready');
+  if (settingsBtn && closeDrawer) {
+    settingsBtn.onclick = () => $("#drawer").classList.add("open");
+    closeDrawer.onclick = () => $("#drawer").classList.remove("open");
+  }
+
+  if (soundToggle) {
+    soundToggle.onchange = e => { soundOn = e.target.checked; };
+  }
+
+  if (themeToggle) {
+    themeToggle.onchange = e => {
+      document.body.classList.toggle("dark", e.target.checked);
+    };
+  }
+
+  if (resetScores) {
+    resetScores.onclick = () => {
+      // Browser-only reset; Pi keeps its own stats per game.
+      updateStats(null, 0, 0, 0);
+      alert("Stats reset (this device view only). Start a new game to sync with Pi.");
+    };
+  }
+
+  if (gameSelect) {
+    gameSelect.onchange = e => {
+      gameShots = parseInt(e.target.value, 10) || 10;
+    };
+    // Initialize from current selection
+    gameShots = parseInt(gameSelect.value || "10", 10);
+  }
+
+  if (startBtn) {
+    startBtn.onclick = onStartClicked;
+  }
+
+  if (stopBtn) {
+    stopBtn.onclick = stopGameOnPi;
+  }
+}
+
+window.addEventListener("DOMContentLoaded", init);
+
+// ---------------- Pi API helpers ----------------
+
+async function pingPi() {
+  try {
+    const resp = await fetch(PI_BASE + "/ping", { method: "GET" });
+    if (!resp.ok) throw new Error("bad status " + resp.status);
+    const data = await resp.json();
+    if (statusEl) statusEl.textContent = "Pi: " + (data.status || "online");
+    return true;
+  } catch (err) {
+    console.error("pingPi failed:", err);
+    if (statusEl) statusEl.textContent = "Pi offline or unreachable.";
+    return false;
+  }
+}
+
+async function startGameOnPi(shots) {
+  const body = JSON.stringify({ shots: shots || 10 });
+  const resp = await fetch(PI_BASE + "/start_game", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body
+  });
+  if (!resp.ok) {
+    const msg = "Pi /start_game failed: " + resp.status;
+    console.error(msg);
+    throw new Error(msg);
+  }
+  const data = await resp.json();
+  return data;
+}
+
+async function stopGameOnPi() {
+  try {
+    const resp = await fetch(PI_BASE + "/stop_game", { method: "POST" });
+    if (!resp.ok) throw new Error("bad status " + resp.status);
+    const data = await resp.json();
+    localRunning = false;
+    stopPolling();
+    if (statusEl) statusEl.textContent = "Stopped by user.";
+    return data;
+  } catch (err) {
+    console.error("stopGameOnPi failed:", err);
+  }
+}
+
+async function fetchStats() {
+  const resp = await fetch(PI_BASE + "/stats", { method: "GET" });
+  if (!resp.ok) throw new Error("bad status " + resp.status);
+  return resp.json();
+}
+
+// ---------------- Game flow ----------------
+
+async function onStartClicked() {
+  if (localRunning) return;
+
+  // Make sure Pi is reachable first
+  const ok = await pingPi();
+  if (!ok) {
+    alert("Could not reach Pi at:\n" + PI_BASE + "\n\nUpdate PI_BASE in main.js or check network.");
+    return;
   }
 
   try {
+    // Warm-up audio on first interaction (for iOS/Chrome auto-play rules)
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     await audioCtx.resume();
   } catch (e) {
-    console.warn('AudioContext resume failed:', e);
+    console.warn("AudioContext resume failed:", e);
   }
 
-  const hfps = $('#hfps')?.checked;
-  const calibHi = $('#calibHi')?.checked;
-
-  // Simple constraint: 640x480 or 1280x720 depending on toggle, 60fps if requested.
-  const widthIdeal  = calibHi ? 1280 : 640;
-  const heightIdeal = calibHi ? 720  : 480;
-
-  const constraints = {
-    video: {
-      facingMode: 'environment',
-      width: { ideal: widthIdeal },
-      height: { ideal: heightIdeal },
-      frameRate: { ideal: hfps ? 60 : 30, max: 60 }
-    },
-    audio: false
-  };
-
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    video.srcObject = stream;
-    await video.play();
-    overlay.width = video.videoWidth || widthIdeal;
-    overlay.height = video.videoHeight || heightIdeal;
-  } catch (e) {
-    console.error(e);
-    alert('Camera permission or constraints failed. Check browser permissions and HTTPS.');
-    throw e;
-  }
-}
-
-// ===== Main flow =====
-
-async function startFlow() {
-  // Gameplay should only start AFTER calibration
-  if (!H) {
-    const status = $('#status');
-    if (status) status.textContent = 'Please Calibrate first (Tap Calibrate, then 4 corners).';
-    alert('Please calibrate first: show the target, tap Calibrate, then tap the 4 corners.');
-    return;
-  }
-
-  try {
-    await ensureCamera();
-  } catch {
-    return;
-  }
-
-  if (running) return;
-
-  // Countdown at the beginning of gameplay
+  // Countdown before we actually tell the Pi to start
+  if (statusEl) statusEl.textContent = "Get ready…";
   await countdown(10);
 
-  shotsFired = 0;
-  totalScore = 0;
-  updateStats();
-  running = true;
-  frameLoop();
-}
-
-// ===== Manual calibration (4-corner tap) =====
-
-async function startManualCalibration() {
-  if (!cvReady) {
-    alert('Vision engine still loading. Wait a moment and try again.');
+  // Tell the Pi to start the game
+  try {
+    if (statusEl) statusEl.textContent = "Starting game on Pi…";
+    await startGameOnPi(gameShots);
+  } catch (err) {
+    console.error(err);
+    alert("Pi /start_game failed. Check Pi and try again.");
+    if (statusEl) statusEl.textContent = "Failed to start on Pi.";
     return;
   }
 
-  try {
-    await ensureCamera();
-  } catch {
-    return;
-  }
-
-  calibrationMode = true;
-  calibPoints = [];
-  if (H) {
-    H.delete();
-    H = null;
-  }
-  const status = $('#status');
-  if (status) status.textContent = 'Tap 4 corners (TL, TR, BR, BL).';
+  localRunning = true;
+  if (statusEl) statusEl.textContent = "Running: " + gameShots + "-shot game.";
+  startPolling();
 }
 
-function handleCalibTap(evt) {
-  if (!calibrationMode) return;
+function startPolling() {
+  if (polling) return;
+  polling = true;
 
-  const rect = overlay.getBoundingClientRect();
-  const clientX = evt.clientX;
-  const clientY = evt.clientY;
-  const x = (clientX - rect.left) * (overlay.width / rect.width);
-  const y = (clientY - rect.top) * (overlay.height / rect.height);
+  const poll = async () => {
+    if (!polling) return;
+    try {
+      const data = await fetchStats();
+      const running = data.running;
+      const status = data.status || "";
+      const shots = data.shots || 0;
+      const shotsGoal = data.shots_goal || gameShots;
+      const last = data.last_score ?? null;
+      const total = data.total_score || 0;
+      const avg = data.avg_score || 0;
 
-  calibPoints.push({ x, y });
+      updateStats(last, shots, total, avg);
 
-  // Draw marker where tapped
-  ctx.save();
-  ctx.beginPath();
-  ctx.strokeStyle = '#00ff73';
-  ctx.fillStyle = '#00ff7366';
-  ctx.lineWidth = 2;
-  ctx.arc(x, y, 10, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-  ctx.restore();
-
-  const status = $('#status');
-  if (status) status.textContent = `Calibration tap ${calibPoints.length}/4`;
-
-  if (calibPoints.length === 4) {
-    buildHomographyFromCalib();
-  }
-}
-
-function buildHomographyFromCalib() {
-  try {
-    // Assume user tapped TL, TR, BR, BL in that order
-    const p0 = calibPoints[0]; // TL
-    const p1 = calibPoints[1]; // TR
-    const p2 = calibPoints[2]; // BR
-    const p3 = calibPoints[3]; // BL
-
-    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
-      p0.x, p0.y,
-      p1.x, p1.y,
-      p2.x, p2.y,
-      p3.x, p3.y
-    ]);
-
-    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
-      0,           0,             // TL
-      warpSize.w,  0,             // TR
-      warpSize.w,  warpSize.h,    // BR
-      0,           warpSize.h     // BL
-    ]);
-
-    if (H) H.delete();
-    H = cv.getPerspectiveTransform(srcTri, dstTri);
-
-    srcTri.delete();
-    dstTri.delete();
-
-    calibrationMode = false;
-    calibPoints = [];
-    const status = $('#status');
-    if (status) status.textContent = 'Calibrated (manual corners). Tap START to begin.';
-  } catch (e) {
-    console.error('Homography build failed:', e);
-    calibrationMode = false;
-    calibPoints = [];
-    const status = $('#status');
-    if (status) status.textContent = 'Calibration failed. Tap Calibrate and try again.';
-  }
-}
-
-// ===== Main loop (hit detection) =====
-
-function frameLoop() {
-  if (!running) return;
-
-  const rAF = video.requestVideoFrameCallback || window.requestAnimationFrame;
-  rAF.call(video, () => {
-    // Draw live video
-    ctx.drawImage(video, 0, 0, overlay.width, overlay.height);
-    // Copy into processing canvas
-    pctx.drawImage(video, 0, 0, proc.width, proc.height);
-
-    const src = cv.imread(proc);
-    const hit = detectTransientRed(src);
-    src.delete();
-
-    if (hit && H) {
-      const sx = overlay.width / proc.width;
-      const sy = overlay.height / proc.height;
-      const visPt = { x: hit.x * sx, y: hit.y * sy };
-
-      const sp = cv.matFromArray(1, 1, cv.CV_32FC2, [visPt.x, visPt.y]);
-      const dp = cv.perspectiveTransform(sp, H);
-      const a = dp.data32F;
-      const ptW = { x: a[0], y: a[1] };
-      sp.delete();
-      dp.delete();
-
-      const now = performance.now();
-      if (now - lastHitTs > 120) {
-        lastHitTs = now;
-        const score = scoreBullseye(ptW);
-
-        shotsFired++;
-        totalScore += score;
-        updateStats(score);
-        drawHit(visPt, score);
-        playSteel();
-
-        if (shotsFired >= gameShots) {
-          running = false;
-          setTimeout(() => {
-            alert(`Done! Total = ${totalScore}  Avg = ${(totalScore / gameShots).toFixed(1)}`);
-          }, 80);
+      if (statusEl) {
+        if (status === "finished") {
+          statusEl.textContent = "Finished (" + shots + "/" + shotsGoal + ")";
+        } else if (status === "running") {
+          statusEl.textContent = "Running (" + shots + "/" + shotsGoal + ")";
+        } else {
+          statusEl.textContent = "Pi: " + status;
         }
       }
-    } else if (!H && !calibrationMode) {
-      const status = $('#status');
-      if (status) status.textContent = 'Not calibrated. Tap Calibrate (then 4 corners).';
-    }
 
-    frameLoop();
-  });
-}
+      // If Pi says finished, stop polling
+      if (!running && status === "finished") {
+        localRunning = false;
+        polling = false;
+        if (pollTimer) clearTimeout(pollTimer);
 
-// ===== Scoring / visuals =====
-
-function scoreBullseye(ptW) {
-  const [cx, cy] = BULLSEYE.center;
-  const rings = BULLSEYE.rings;
-  const pts = BULLSEYE.points;
-  const d = Math.hypot(ptW.x - cx, ptW.y - cy);
-  for (let i = 0; i < rings.length; i++) {
-    if (d <= rings[i]) return pts[i];
-  }
-  return pts[pts.length - 1];
-}
-
-function drawHit(pt, score) {
-  ctx.save();
-  ctx.strokeStyle = '#00ff73';
-  ctx.lineWidth = 3;
-  ctx.fillStyle = '#00ff7366';
-  ctx.beginPath();
-  ctx.arc(pt.x, pt.y, 18, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 20px system-ui';
-  ctx.textAlign = 'center';
-  ctx.fillText('+' + score, pt.x, pt.y - 26);
-  ctx.restore();
-}
-
-// ===== Red flash detection =====
-
-function detectTransientRed(src) {
-  const debug = $('#debugToggle')?.checked;
-  const rgb = new cv.Mat();
-  const hsv = new cv.Mat();
-  cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB, 0);
-  cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV, 0);
-
-  // HSV red mask
-  const m1 = new cv.Mat();
-  const m2 = new cv.Mat();
-  const maskRed = new cv.Mat();
-  const lowS = 110, lowV = 170;
-  cv.inRange(
-    hsv,
-    new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, lowS, lowV, 0]),
-    new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [12, 255, 255, 0]),
-    m1
-  );
-  cv.inRange(
-    hsv,
-    new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [160, lowS, lowV, 0]),
-    new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [179, 255, 255, 0]),
-    m2
-  );
-  cv.add(m1, m2, maskRed);
-
-  // R - G
-  const ch = new cv.MatVector();
-  cv.split(rgb, ch);
-  const R = ch.get(0);
-  const G = ch.get(1);
-  const diff = new cv.Mat();
-  cv.subtract(R, G, diff);
-  const maskRG = new cv.Mat();
-  cv.threshold(diff, maskRG, 36, 255, cv.THRESH_BINARY);
-
-  // Combined masked red area
-  const combined = new cv.Mat();
-  cv.bitwise_and(maskRed, maskRG, combined);
-
-  const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-  cv.morphologyEx(combined, combined, cv.MORPH_OPEN, kernel);
-
-  const sens = parseInt($('#sens').value, 10) || 18;
-  const minArea = parseInt($('#minArea').value, 10) || 16;
-
-  let pt = null;
-  if (prevMask) {
-    const pos = new cv.Mat();
-    cv.subtract(combined, prevMask, pos);
-
-    const contours = new cv.MatVector();
-    const hierarchy = new cv.Mat();
-    cv.findContours(pos, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    let bestArea = 0;
-    for (let i = 0; i < contours.size(); i++) {
-      const c = contours.get(i);
-      const area = cv.contourArea(c);
-      if (area > minArea && area > sens && area > bestArea) {
-        const m = cv.moments(c);
-        if (m.m00 !== 0) {
-          pt = {
-            x: Math.round(m.m10 / m.m00),
-            y: Math.round(m.m01 / m.m00)
-          };
-          bestArea = area;
-        }
+        setTimeout(() => {
+          alert("Game finished.\nTotal: " + total + "\nAvg: " + avg.toFixed(1));
+        }, 100);
+        return;
       }
+    } catch (err) {
+      console.error("pollStats error:", err);
+      if (statusEl) statusEl.textContent = "Lost contact with Pi.";
+      // We could stop polling or keep trying; for now keep trying slowly
     }
 
-    if (debug) {
-      const vis = new cv.Mat();
-      cv.cvtColor(pos, vis, cv.COLOR_GRAY2RGBA, 0);
-      const smallW = 160;
-      const smallH = Math.round(pos.rows * (160 / pos.cols));
-      const dsize = new cv.Size(smallW, smallH);
-      const small = new cv.Mat();
-      cv.resize(vis, small, dsize, 0, 0, cv.INTER_NEAREST);
-      const imgData = new ImageData(new Uint8ClampedArray(small.data), smallW, smallH);
-      ctx.putImageData(imgData, 8, 8);
-      vis.delete();
-      small.delete();
-    }
+    pollTimer = setTimeout(poll, 250);
+  };
 
-    pos.delete();
-    contours.delete();
-    hierarchy.delete();
-  }
-
-  if (prevMask) prevMask.delete();
-  prevMask = combined.clone();
-
-  rgb.delete();
-  hsv.delete();
-  m1.delete();
-  m2.delete();
-  maskRed.delete();
-  diff.delete();
-  maskRG.delete();
-  combined.delete();
-  kernel.delete();
-  R.delete();
-  G.delete();
-  ch.delete();
-
-  return pt;
+  poll();
 }
 
-// ===== Sounds + countdown + stats =====
+function stopPolling() {
+  polling = false;
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+// ---------------- UI helpers ----------------
+
+function updateStats(lastScore, shots, total, avg) {
+  if (lastScoreEl) {
+    lastScoreEl.textContent = lastScore !== null && lastScore !== undefined ? lastScore : "—";
+  }
+  if (shotsFiredEl) {
+    shotsFiredEl.textContent = shots != null ? shots : 0;
+  }
+  if (totalScoreEl) {
+    totalScoreEl.textContent = total != null ? total : 0;
+  }
+  if (avgScoreEl) {
+    avgScoreEl.textContent = avg != null ? avg.toFixed(1) : "0.0";
+  }
+}
+
+const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+async function countdown(n) {
+  if (!countdownEl) return;
+  countdownEl.classList.remove("hidden");
+  for (let i = n; i > 0; i--) {
+    countdownEl.textContent = String(i);
+    playBeep();
+    await sleep(1000);
+  }
+  countdownEl.textContent = "GO!";
+  playBeep();
+  await sleep(500);
+  countdownEl.classList.add("hidden");
+}
+
+// ---------------- Sounds ----------------
 
 function playBeep() {
   if (!soundOn) return;
@@ -474,7 +282,7 @@ function playBeep() {
     ctx.resume();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.type = 'sine';
+    osc.type = "sine";
     osc.frequency.value = 880;
     gain.gain.setValueAtTime(0, ctx.currentTime);
     gain.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 0.01);
@@ -484,12 +292,17 @@ function playBeep() {
     osc.stop(ctx.currentTime + 0.14);
     audioCtx = ctx;
   } catch (e) {
-    const el = document.getElementById('beepAudio');
-    if (el) el.play().catch(() => {});
+    const el = $("#beepAudio");
+    if (el) {
+      el.currentTime = 0;
+      el.play().catch(() => {});
+    }
   }
 }
 
 function playSteel() {
+  // We are not triggering steel directly here, because Pi does not send per-hit notifications yet.
+  // Later we can extend /stats or add a /hits stream for sound per hit.
   if (!soundOn) return;
   try {
     const ctx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -497,11 +310,11 @@ function playSteel() {
     const o1 = ctx.createOscillator();
     const o2 = ctx.createOscillator();
     const g = ctx.createGain();
-    o1.type = 'sine';
-    o2.type = 'sine';
+    o1.type = "sine";
+    o2.type = "sine";
     o1.frequency.value = 1400;
     o2.frequency.value = 2200;
-    const end = ctx.currentTime + 0.2;
+    const end = ctx.currentTime + 0.18;
     g.gain.setValueAtTime(0.7, ctx.currentTime);
     g.gain.exponentialRampToValueAtTime(0.0001, end);
     o1.connect(g);
@@ -513,29 +326,10 @@ function playSteel() {
     o2.stop(end);
     audioCtx = ctx;
   } catch (e) {
-    const el = document.getElementById('steelAudio');
-    if (el) el.play().catch(() => {});
+    const el = $("#steelAudio");
+    if (el) {
+      el.currentTime = 0;
+      el.play().catch(() => {});
+    }
   }
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-async function countdown(n) {
-  countdownEl.classList.remove('hidden');
-  for (let i = n; i > 0; i--) {
-    countdownEl.textContent = String(i);
-    playBeep();
-    await sleep(1000);
-  }
-  countdownEl.textContent = 'GO!';
-  playBeep();
-  await sleep(500);
-  countdownEl.classList.add('hidden');
-}
-
-function updateStats(last = null) {
-  $('#lastScore').textContent = last !== null ? last : '—';
-  $('#shotsFired').textContent = shotsFired;
-  $('#totalScore').textContent = totalScore;
-  $('#avgScore').textContent = shotsFired ? (totalScore / shotsFired).toFixed(1) : 0;
 }
