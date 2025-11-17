@@ -68,3 +68,104 @@ video,canvas{width:100%;height:auto;display:block}
 .hidden {
   display: none !important;
 }
+
+/* Fullscreen overlay */
+#countdownOverlay {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  background: radial-gradient(circle at center, rgba(50, 80, 50, 0.9), rgba(5, 10, 5, 0.98));
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+  transition: background 0.25s ease-out;
+}
+
+#countdownOverlay.hidden {
+  display: none !important;
+}
+
+/* Main number */
+#countdownText {
+  font-size: 22vw;              /* HUGE */
+  font-weight: 900;
+  color: #e9fbe9;
+  text-shadow: 0 0 28px #000;
+  letter-spacing: 0.06em;
+  animation: cd-text-pulse 0.8s infinite;
+}
+
+/* Subtext below (“STANDBY”, “ARMED”, “ENGAGE”) */
+#cdSubtext {
+  margin-top: 1rem;
+  font-size: 5vw;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.33em;
+  color: #9be29b;
+  text-shadow: 0 0 14px #000;
+}
+
+/* Crosshair + ring */
+#cdCrosshair {
+  position: absolute;
+  width: 55vmin;
+  height: 55vmin;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.cd-line {
+  position: absolute;
+  background: rgba(180, 255, 180, 0.35);
+}
+
+.cd-line-h {
+  width: 100%;
+  height: 2px;
+}
+
+.cd-line-v {
+  height: 100%;
+  width: 2px;
+}
+
+.cd-ring {
+  position: absolute;
+  width: 70%;
+  height: 70%;
+  border-radius: 50%;
+  border: 2px solid rgba(180, 255, 180, 0.4);
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.9);
+  animation: cd-ring-pulse 1.2s infinite;
+}
+
+/* States: cool (10–4), hot (3–1), go */
+#countdownOverlay.cd-cool {
+  background: radial-gradient(circle at center, rgba(40,70,40,0.9), rgba(5,10,5,0.98));
+}
+
+#countdownOverlay.cd-hot {
+  background: radial-gradient(circle at center, rgba(80,40,40,0.94), rgba(10,5,5,0.98));
+}
+
+#countdownOverlay.cd-go {
+  background: radial-gradient(circle at center, rgba(10, 120, 40, 0.95), rgba(0, 0, 0, 0.98));
+}
+
+/* Animations */
+@keyframes cd-text-pulse {
+  0% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.06); opacity: 1; }
+  100% { transform: scale(1); opacity: 0.8; }
+}
+
+@keyframes cd-ring-pulse {
+  0% { transform: scale(1); opacity: 0.8; }
+  80% { transform: scale(1.05); opacity: 1; }
+  100% { transform: scale(1); opacity: 0.6; }
+}
