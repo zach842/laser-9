@@ -260,17 +260,23 @@ function updateStats(lastScore, shots, total, avg) {
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
 async function countdown(n) {
-  if (!countdownEl) return;
-  countdownEl.classList.remove("hidden");
+  const overlay = document.getElementById("countdownOverlay");
+  const text = document.getElementById("countdownText");
+  if (!overlay || !text) return;
+
+  overlay.classList.remove("hidden");
+
   for (let i = n; i > 0; i--) {
-    countdownEl.textContent = String(i);
+    text.textContent = i;
     playBeep();
-    await sleep(1000);
+    await new Promise(res => setTimeout(res, 1000));
   }
-  countdownEl.textContent = "GO!";
+
+  text.textContent = "GO!";
   playBeep();
-  await sleep(500);
-  countdownEl.classList.add("hidden");
+  await new Promise(res => setTimeout(res, 600));
+
+  overlay.classList.add("hidden");
 }
 
 // ---------------- Sounds ----------------
