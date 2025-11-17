@@ -10,7 +10,7 @@
 const $ = sel => document.querySelector(sel);
 
 // >>> SET THIS TO YOUR PI'S ADDRESS <<<
-let PI_BASE = "http://raspberrypi.local:5000"; 
+let PI_BASE = "http://localhost:5000";
 // If raspberrypi.local doesn't resolve, change to e.g. "http://192.168.1.42:5000"
 
 let soundOn = true;
