@@ -44,3 +44,27 @@ video,canvas{width:100%;height:auto;display:block}
   .btn,.icon-btn{ padding:6px 10px; }
   .brand{ font-size:14px; }
 }
+#countdownOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(20, 40, 20, 0.88); /* Tactical OD-green transparent overlay */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+}
+
+#countdownText {
+  font-size: 20vw;        /* HUGE font based on viewport width */
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0px 0px 25px #000;
+  font-family: "Helvetica", "Arial", sans-serif;
+}
+
+.hidden {
+  display: none !important;
+}
