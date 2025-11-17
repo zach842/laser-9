@@ -259,26 +259,49 @@ function updateStats(lastScore, shots, total, avg) {
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
+const sleep = ms => new Promise(res => setTimeout(res, ms));
+
 async function countdown(n) {
   const overlay = document.getElementById("countdownOverlay");
   const text = document.getElementById("countdownText");
-  if (!overlay || !text) return;
+  const sub = document.getElementById("cdSubtext");
+  if (!overlay || !text || !sub) return;
 
-  overlay.classList.remove("hidden");
+  // Show overlay
+  overlay.classList.remove("hidden", "cd-cool", "cd-hot", "cd-go");
+  overlay.classList.add("cd-cool");
+  sub.textContent = "STANDBY";
 
   for (let i = n; i > 0; i--) {
     text.textContent = i;
+
+    if (i > 3) {
+      // Cool phase: STANDBY
+      overlay.classList.remove("cd-hot");
+      overlay.classList.add("cd-cool");
+      sub.textContent = "STANDBY";
+    } else {
+      // Hot phase: ARMED (3..1)
+      overlay.classList.remove("cd-cool");
+      overlay.classList.add("cd-hot");
+      sub.textContent = "ARMED";
+    }
+
     playBeep();
-    await new Promise(res => setTimeout(res, 1000));
+    await sleep(1000);
   }
 
-  text.textContent = "GO!";
+  // GO phase
+  overlay.classList.remove("cd-cool", "cd-hot");
+  overlay.classList.add("cd-go");
+  text.textContent = "GO";
+  sub.textContent = "ENGAGE";
   playBeep();
-  await new Promise(res => setTimeout(res, 600));
+  await sleep(600);
 
   overlay.classList.add("hidden");
+  overlay.classList.remove("cd-go");
 }
-
 // ---------------- Sounds ----------------
 
 function playBeep() {
