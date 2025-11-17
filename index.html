@@ -44,10 +44,16 @@
       <video id="video" playsinline muted></video>
       <canvas id="overlay"></canvas>
       <canvas id="proc" width="640" height="360" style="display:none"></canvas>
-      <!-- Fullscreen countdown overlay -->
-      <div id="countdownOverlay" class="hidden">
-         <div id="countdownText">10</div>
-      </div>
+      <!-- Tactical fullscreen countdown overlay -->
+<div id="countdownOverlay" class="hidden">
+  <div id="cdCrosshair">
+    <div class="cd-line cd-line-h"></div>
+    <div class="cd-line cd-line-v"></div>
+    <div class="cd-ring"></div>
+  </div>
+  <div id="countdownText">10</div>
+  <div id="cdSubtext">STANDBY</div>
+</div>
 
     <section class="panel">
       <div class="stat"><span id="shotsFired">0</span><small>Shots</small></div>
